@@ -131,6 +131,7 @@ graph twoway ///
 	xlabel(0 "DC Total" 1 "Gold" 2 "Silver" 3 "Bronze" 4 "Private", labsize(small)) ///
 	graphregion(color(white)) ///
 	plotregion(margin(l=4 b=0)) ///
+	yline(43.900227, lcolor(sand)) ///
 	legend(off) ///
 	caption("Note: Capacity includes children under age 5 only." "          Centers serving only school-age children are excluded.", size(vsmall))
 graph export "$charts/avg_cap_by_tier.jpg", as(jpg) replace
