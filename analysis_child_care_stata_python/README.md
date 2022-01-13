@@ -52,10 +52,10 @@ Chart labels include center counts for each quality tier, showing a small number
 
 ![image](https://github.com/jandre17/code-samples/blob/main/analysis_child_care_stata_python/charts/box_cap_tier.jpg?raw=true)
 
-The statistical significance of average capacity differences across tiers (and relative to the overall total) can be tested using a simple regression. The below bar chart plots 
+The statistical significance of average capacity differences across tiers (relative to the overall DC total) can be tested using a simple regression. The below bar chart plots 
 the average licensed capacity for each tier, including error bars indicating the 95% confidence interval. The wide error bar for the silver tier reflects the small sample size. 
-When error bars do not overlap, we can conclude that there is a statistically significant difference in average capacity. For example, gold centers, on average, have 
-significantly higher capacity for children under age 5, and bronze centers have significantly lower capacity.
+When error bars do not overlap the DC total average capacity, we can conclude that there is a statistically significant difference in average capacity. 
+For example, gold centers, on average, have significantly higher capacity for children under age 5, and bronze centers have significantly lower capacity.
 
 ![image](https://github.com/jandre17/code-samples/blob/main/analysis_child_care_stata_python/charts/avg_cap_by_tier.jpg?raw=true)
 
