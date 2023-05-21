@@ -1,0 +1,535 @@
+---
+title: "Code Sample: Pothole 311 Report Exploratory Data Analysis"
+author: "Jennifer Andre"
+date: last-modified
+date-format: "MMMM DD, YYYY"
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    embed-resources: true
+---
+
+# Exploratory Data Analysis of Pothole Reports and Repairs in Washington, DC
+
+Code sample located [here](https://github.com/jandre17/code-samples/tree/main/eda_potholes_R). (https://github.com/jandre17/code-samples/tree/main/eda_potholes_R)
+
+Note: This code sample is contained within a Quarto document. [Quarto](https://quarto.org/) is a powerful scientific publishing system for documentation and reproducibility of data analyses.
+
+## Introduction
+
+Potholes can cause damage to vehicles and are a danger to drivers, bicyclists, and pedestrians alike. Fundamental city functions like pothole investigations and repairs help to keep streets safe and prevent interruptions to road travel.
+
+Residents of Washington, DC can request pothole repairs via the [311 reporting process](https://311.dc.gov/citizen/home). The [District Department of Transportation (DDOT) website](https://ddot.dc.gov/service/pothole-repair) states "DDOT's standard is to repair potholes within three business days (72 hours) of the time they are reported."
+
+### Purpose
+
+The goal of this exploratory data analysis is to explore and summarize some prominent features of the 311 pothole reports data set. Two primary analysis questions guide this exploration:
+
+1. How does the incidence of pothole repair requests in Washington, DC vary by geographic location or by time of year?
+
+2. How timely are DDOT Pothole repairs, and are there disparities in wait times by Ward, month of report, or day of report? What are the most important predictors of on-time resolution of pothole investigation and repair?
+
+### Data Sources
+
+The primary data source used for this analysis is [311 City Service Requests in 2021](https://opendata.dc.gov/datasets/DCGIS::311-city-service-requests-in-2021/about), accessed via the [Open Data DC](https://opendata.dc.gov/) portal.
+
+Supplemental data sources include 2017-2021 American Community Survey 5-year estimates (accessed via the `tidycensus` package) and geographic boundary data from the US Census Bureau (accessed via the `tigris` package).
+
+## Setup
+
+The code block below lists packages that are necessary to install and load for this analysis.
+
+RStudio v2022.07 or later is required to edit and preview Quarto documents.
+
+The `tidycensus` package can be used without an API key for a limited number of queries. To install an API key in your `.REnviron` file, run `census_api_key("[key]", install = TRUE)`.
+
+```{r, message = FALSE}
+# load packages
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(tigris)
+library(knitr)
+library(tidycensus)
+library(tidymodels)
+library(vip)
+
+# set visualization theme
+theme_set(theme_minimal())
+```
+
+## Prep Data
+
+In this section, I will load, explore, and prepare the data sources for this analysis.
+
+### 311 City Service Requests in 2021
+
+These data are from the DC 311 service request center. The full data set includes all service requests for abandoned vehicles, bulk trash pickup, streetlight repairs, and more. For this analysis, I will investigate pothole reports only.
+
+#### Access and Load
+
+The `sf` package enables me to easily read `geojson` data from the Open Data DC API. I used the [API Explorer](https://opendata.dc.gov/datasets/DCGIS::311-city-service-requests-in-2021/api) to create a query URL that is restricted to pothole reports only (SERVICE CODE = S0301).
+
+```{r, output = FALSE}
+# create query URL using Open Data DC API Explorer
+# restricted to "SERVICE CODE" = "S0301" ("Pothole")
+dc_url <- "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/ServiceRequests/MapServer/12/query?where=SERVICECODE%20%3D%20'S0301'&outFields=*&outSR=4326&f=json"
+
+# read data object from query URL and convert column names to lowercase
+df_prep <- st_read(dc_url) %>%
+  rename_with(tolower, everything())
+
+# remove point geometry from this dataframe - not necessary for this analysis
+st_geometry(df_prep) <- NULL
+```
+
+To verify that the API call worked as intended, I'll check that all records have "S0301" in the `servicecode` field.
+
+```{r}
+# verify API result
+stopifnot(df_prep$servicecode == "S0301")
+```
+
+#### Data Munging
+
+Next, I explore the characteristics of the data set and determine some preparation steps for analysis.
+
+The 311 potholes data set has `r format(nrow(df_prep), big.mark = ",")` rows and `r format(ncol(df_prep), big.mark = ",")` columns.
+
+The simple summary below shows column names, class types, and some summary statistics. There are many variables in this dataset that I will not explore in this analysis, and I will remove these in a later step. This summary output also reveals to me that some of the fields I do intend to use are currently formatted in class types that will be difficult to work with (e.g., dates as strings), and I will need to adjust these.
+
+```{r}
+# summarize columns
+kable(summary(df_prep))
+```
+
+For example, I want to use the `adddate` (date and time of report), `resolutiondate` (date and time of service completion), and `serviceduedate` (repair due date - 3 business days after `adddate`) fields to examine pothole repair wait times. These are currently stored as character versions of date-times, which are not very useful (for example: `r df_prep$adddate[1]`). 
+
+I created the below function to parse these character dates into workable date-times. In a later step, I will apply this function, calculate the times between these dates ("wait time" and "overdue time"), and create factors indicating the month, week, and date of the 311 report.
+
+```{r}
+# function for cleaning character dates
+# input: character date field
+# output: datetime field
+clean_date <- function(date) {
+  
+  strip <- sub("0{3}$", "", date) # remove trailing zeroes
+  num <- as.numeric(strip) # convert character to numeric
+  datetime <- as_datetime(num) # convert numeric to datetime
+  
+  return(datetime)
+}
+```
+
+In this analysis, I will explore differences in reports and completion times by Ward. The table below shows a simple tabulation of reports by Ward. In a later step, I will format the Ward variable as a factor for later use.
+
+```{r}
+# count of pothole reports by Ward
+kable(table(df_prep$ward), 
+      col.names = c("Ward", "311 Pothole Reports"))
+```
+
+There is a field called `priority` that initially seems very interesting and could potentially be a useful predictor of pothole repair on-time performance and wait time. Unfortunately, all but 5 report records are "Standard", so there is not enough variation to be useful for this analysis.
+
+```{r}
+# count of pothole reports by priority type
+kable(table(df_prep$priority), 
+      col.names = c("Priority", "311 Pothole Reports"),
+      format.args = list(big.mark = ","))
+```
+
+Finally, I will check the service order status field. The table below shows that most records are `Closed`. I only want to explore 311 reports that have been completed in this analysis, so I will filter to these `Closed` records in a later step.
+
+```{r}
+# count of pothole reports by service order status
+kable(table(df_prep$serviceorderstatus), 
+      col.names = c("Service Order Status", "311 Pothole Reports"),
+      format.args = list(big.mark = ","))
+```
+
+#### Create Analysis Data
+
+In this section, I create an analysis dataframe with the modifications I determined in the previous exploratory steps. I also create a few new fields that I will explore as predictors in a later analysis.
+
+```{r}
+df <- df_prep %>%
+
+  # first, use mutate to implement wrangling steps
+  mutate(
+    
+    # apply clean_date function to date fields
+    across(c(adddate, resolutiondate, serviceduedate), clean_date),
+    
+    # create date version of report date (without time stamp),
+    adddate_date = as.Date(adddate),
+    
+    # create on-time boolean
+    on_time_completion = resolutiondate <= serviceduedate,
+    
+    # calculate number of days between resolution and due date (overdue time)
+    overdue_time = if_else(resolutiondate > serviceduedate, 
+                           difftime(resolutiondate, serviceduedate, units = "days"), 
+                           NA),
+    
+    # calculate number of days between resolution and date of report (wait time)
+    wait_time = difftime(resolutiondate, adddate, units = "days"),
+    
+    # create factor variables for the month, week, and day of report
+    report_month = month(adddate, label = TRUE),
+    report_week = as.factor(week(adddate)),
+    report_day = wday(adddate, label = TRUE),
+    
+    # format ward as a factor variable
+    ward = as.factor(ward)
+    
+    ) %>%
+  
+  # next, filter to keep only "Closed" records
+  filter(serviceorderstatus == "Closed") %>%
+  
+  # then, add monthly, weekly, and daily report volume to use as predictors in later analyses
+  add_count(report_month, name = "tot_report_month") %>%
+  add_count(report_week, name = "tot_report_week") %>%
+  add_count(adddate_date, name = "tot_report_day") %>%
+
+  # as a final step, remove some unused fields for the sake of clarity
+  select(-c(servicecodedescription, servicetypecodedescription,
+            serviceorderdate, inspectionflag, inspectiondate, inspectorname, 
+            status_code, servicerequestid, organizationacronym, servicecallcount,
+            streetaddress, xcoord, ycoord, latitude, longitude, city, state,
+            maraddressrepositoryid, details, gis_id, globalid,
+            creator, created, editor, edited))
+```
+
+### American Community Survey Data
+
+Next, I access and prepare Ward-level population counts from the Census Bureau American Community Survey 2017-2021 5-year estimates. These will be used to standardize Ward-level counts of 311 reports.
+
+```{r, output = FALSE}
+# use tidycensus to query API
+# Census API key is saved in .REnviron file
+# see: https://search.r-project.org/CRAN/refmans/tidycensus/html/census_api_key.html
+dc_acs_prep <- get_acs(geography = "state legislative district (upper chamber)", 
+                       variables = c(population = "B01001_001"), 
+                       state = "DC", 
+                       year = 2021) 
+
+# create ward as a factor, keep ward and population for later use
+dc_acs <- dc_acs_prep %>%
+  mutate(ward = as.factor(substring(sub("^Ward ", "", NAME), 1, 1))) %>%
+  rename(population = estimate) %>%
+  select(ward, population)
+```
+
+### Census Geographic Data
+
+Finally, I access shapefiles of DC Wards from Census Bureau data using the `tigris` package.
+
+```{r, output = FALSE}
+# access boundaries of DC Wards
+wards_prep <- state_legislative_districts(
+  state = "DC",
+  house = "upper", 
+  cb = FALSE,
+  year = 2021)
+
+# create ward factor
+wards <- wards_prep %>%
+  mutate(ward =  as.factor(substring(sub("^Ward ", "", NAMELSAD), 1, 1)))
+```
+
+## Analysis
+
+In the following sections, I will explore my two primary analysis questions.
+
+### Q1: Incidence of 311 Pothole Reports
+
+How does the incidence of pothole repair requests in Washington, DC vary by geographic location or by time of year?
+
+#### A. Incidence by Geographic Location
+
+Earlier, I tabulated counts of 311 Pothole reports by Ward. I now want to visualize these report counts on a map of DC Wards. I also want to account for differences in populations between wards and standardize the reports counts by population.
+
+Note: This is an imperfect way to standardize report volumes. A recommendation for future work is to standardize Ward-level report counts by the number of vehicles in a Ward, a measure of road usage, and/or some measure of natural susceptibility to potholes.
+
+First, I'll create a dataframe of reports and population-standardized reports by Ward, and I'll join this with my spatial data.
+
+```{r}
+ward_reports <- df %>%
+  
+  # count reports by ward
+  group_by(ward) %>%
+  summarize(reports = n()) %>%
+  
+  # join ACS population data and create a standardized reports measure
+  left_join(dc_acs, by = "ward") %>%
+  mutate(reports_per1k = reports / (population / 1000))
+
+# join report counts and standardized counts to the ward boundaries object
+ward_reports_geo <- wards %>%
+  left_join(ward_reports, by = "ward")
+```
+
+```{r}
+# counts of reports and standardized reports by Ward
+kable(ward_reports, 
+      col.names = c("Ward", 
+                    "311 Pothole Reports", 
+                    "Population", 
+                    "Reports per 1K Population"),
+      format.args = list(big.mark = ",", digits = 3))
+```
+
+Next, I will create a map plot function and apply it to the report counts and standardized report counts.
+
+```{r, warning = FALSE}
+# prepare basic map plot function
+# input: fill variable
+# output: map ggplot object
+map_dc <- function(fillvar){
+  
+  ggplot(data = ward_reports_geo) + 
+    geom_sf(aes(fill = !!sym(fillvar))) +
+    geom_sf_label(aes(label = NAMELSAD),
+                  size = 2.5) +
+    theme_map()
+
+}
+```
+
+```{r}
+# create map for report counts
+reports_map <- map_dc("reports") +
+  scale_fill_continuous(trans = "reverse",
+                        name = "311 Pothole Reports") +
+  labs(title = "Incidence of Reports (Total) by Ward")
+
+# create map for standardized report counts
+standardized_map <- map_dc("reports_per1k") +
+  scale_fill_continuous(trans = "reverse",
+                        name = "311 Pothole Reports\nper 1K Population") +
+  labs(title = "Incidence of Reports (Standardized) by Ward")
+```
+
+The resulting choropleth maps are displayed below. The distributions of reports and standardized reports by Ward are very similar, but there are some differences. For example, Ward 2 appears to have a higher report incidence (in relative terms) when standardizing by population.
+
+```{r, warning = FALSE}
+# display maps side-by-side
+grid.arrange(reports_map, standardized_map, nrow = 1)
+```
+
+Overall, the distributions of report incidence and standardized report incidence by Ward are very similar. Looking comparatively at the Wards, Wards 3 and 5 have the highest incidence of pothole reports, while Wards 1 and 6 have the lowest.
+
+#### B. Incidence by Time of Year
+
+The plot below shows the number of pothole reports by day throughout 2021. The incidence of reports is much higher in March and April compared to the rest of the year. It does not seem surprising that these reports spike in spring, when potholes are more likely to appear following the freezing and wet winter months.
+
+```{r}
+# filter dataframe to daily counts of reports and plot time series
+df %>%
+  distinct(adddate_date, tot_report_day) %>%
+  ggplot(aes(x = adddate_date, y = tot_report_day)) +
+    geom_line() +
+    labs(title = "Time Series of Pothole Reports",
+         x = "Date of Report (2021)", 
+         y = "Number of Reports") +
+  scale_x_date(date_breaks = "1 month", 
+               date_labels = "%b")
+```
+
+### Q2: Timeliness of Repairs and Disparities in Wait Times
+
+How timely are DDOT Pothole repairs, and are there disparities in wait times by Ward, month of report, or day of report? What are the most important predictors of on-time resolution of pothole investigation and repair?
+
+#### A. Overall Timeliness and Wait Times
+
+DDOT states that the standard investigation and repair time following a pothole report is 3 business days. To measure on-time performance, I will compare the report date (`adddate`) with the service due date (`serviceduedate`).
+
+Overall, `r format(sum(df$on_time_completion), big.mark = ",")` pothole reports are resolved on or before the service due date. This means that `r round(((sum(df$on_time_completion) / nrow(df)) * 100), 0)`% of reports are resolved on-time.
+
+The median wait time is `r round(median(as.numeric(df$wait_time)), 2)` days, well below the 3 business day expected wait time. The average wait time (including weekends) is `r round(mean(df$wait_time), 2)` days. It is not surprising that the mean is higher, given that those reporting a pothole on a Thursday or Friday will automatically need to wait longer for a resolution. A recommendation for future work is to remove weekends and holidays from these wait times.
+
+The median overdue time (i.e., total time beyond service due date) is `r round(median(as.numeric(df$overdue_time), na.rm = TRUE), 2)` days, well below the 3 business day expected wait time. The average overdue time (including weekends) is `r round(mean(as.numeric(df$overdue_time), na.rm = TRUE), 2)` days. 
+
+Next, I'll take a closer look at the distributions of these wait times and overdue times.
+
+```{r}
+# prepare data for plot by pivoting time types to longer and preparing variable types
+bp_prep <- df %>%
+  select(objectid, wait_time, overdue_time) %>%
+  pivot_longer(!objectid, 
+               names_to = "type", 
+               values_to = "time") %>%
+  filter(is.na(time) == FALSE) %>%
+  mutate(type = as.factor(type),
+         time = as.numeric(time))
+```
+
+```{r}
+# plot side-by-side boxplots
+bp_prep %>%
+  ggplot(aes(x = time, fill = type)) +
+    geom_boxplot() +
+    labs(title = "Distribution of Wait and Overdue Times",
+         x = "Days") +
+     scale_fill_discrete(name = "Time Type",
+                         breaks = c("wait_time", "overdue_time"),
+                         labels = c("Wait Time", "Overdue Ttime")) +
+    theme(axis.ticks.y = element_blank(),
+          axis.text.y = element_blank())
+```
+
+These distributions are difficult to see because of one large outlier report. I will remove that observation to improve the plot visually.
+
+```{r}
+# remove outliers, and plot
+bp_prep %>%
+  filter((as.numeric(time) < 100)) %>%
+  ggplot(aes(x = time, fill = type)) +
+    geom_boxplot() +
+    labs(title = "Distribution of Wait and Overdue Times",
+         x = "Days") +
+     scale_fill_discrete(name = "Time Type",
+                         breaks = c("wait_time", "overdue_time"),
+                         labels = c("Wait Time", "Overdue Ttime")) +
+    theme(axis.ticks.y = element_blank(),
+          axis.text.y = element_blank())
+```
+
+Overall, the majority of pothole repairs are completed on time. However, the distributions of wait times and overdue times show that some reports take much longer than expected to be resolved, with some reports being resolved nearly one month after initial report.
+
+#### B. Disparities in On-Time Performance, Wait Times, and Overdue Times
+
+Are there disparities in on time performance, wait times, and overdue times? Is on-time performance or speed of resolution correlated with Ward, month of report, or day of report?
+
+To explore this, I will take a closer look at mean performance across Wards, month of pothole report, and day of pothole report. The following bar charts show mean values with bootstrapped 95% confidence intervals. These confidence intervals help to determine if differences are statistically significant. I use bootstrapping here to make no assumptions about the normality of underlying distributions.
+
+A recommendation for future work is to compare medians, which are less influenced by extreme values and may be more reflective of a typical wait time.
+
+```{r}
+# first, create a function to plot bars and error bars with xvar and yvar inputs
+# inputs: x variable name (group), y variable name (metric)
+# output: bar chart with 95% bootstrap confidence intervals
+plot_disp <- function(xvar, yvar) {
+  
+  ggplot(df, aes(x = !!sym(xvar), y = as.numeric(!!sym(yvar)))) + 
+    geom_bar(stat = "summary", fun = "mean", na.rm = TRUE) +
+    stat_summary(fun.data = "mean_cl_boot", geom = "errorbar", na.rm = TRUE) +    
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = str_to_sentence(gsub("_", " ", xvar)),
+         y = str_to_sentence(gsub("_", " ", yvar)),
+         title = paste0("Average ", gsub("_", " ", yvar), " by ", gsub("_", " ", xvar)))
+  
+}
+
+# create vectors of x variables to iterate over
+xvars <- c("ward", "report_month", "report_day")
+```
+
+First, I will take a closer look at disparities in on-time performance rates by Ward, month of report, and day of report.
+
+```{r}
+# apply plotting function across xvars, using on-time completion metric
+map(xvars, plot_disp, yvar = "on_time_completion")
+```
+Key takeaways:
+
+* By Ward: On-time performance is pretty comparable across Wards, with only small mean differences.
+
+* By month of report: On-time performance is significantly lower in January and February than in the other months of the year, which may indicate that poor weather conditions cause delays in repairs. On-time performance improves dramatically in March and April, though still remains a bit lower than other months. The time series plot earlier showed that March and April are the months with the most reports, and it seems that DDOT might have a hard time keeping up with them.
+
+* By day of report: On-time performance is pretty comparable across day of week on which a report is made, with only small mean differences. Note: Recall that this on-time performance only considers business days. Potholes reported on Thursdays and Fridays may take more total days to repair due to the weekend, but will still be considered on time if resolved within 3 business days.
+
+Next, I will take a closer look at disparities in mean wait time by Ward, month of report, and day of report. Wait time is not an ideal measure here because it includes weekends and holidays, which are days that DDOT does not count in repair time frames.
+
+```{r}
+# apply plotting function across xvars, using wait time metric
+map(xvars, plot_disp, yvar = "wait_time")
+```
+Key takeaways:
+
+* By Ward: Mean wait times vary somewhat by Ward. Some of the largest mean differences shown in this plot are about 0.5 days, but the large error bars indicate that these may not be statistically significant.
+
+* By month of report: As expected, mean wait times are much larger in January and February than in other months, which is consistent with the lower on-time performance in these months observed previously.
+
+* By day of report: As expected, mean wait times are larger for reports made on Thursdays and Fridays because DDOT does not complete work on weekends.
+
+Finally, I will take a closer look at disparities in mean overdue time by Ward, month of report, and day of report. This measure captures the overdue time between a service due date and the resolution date for repairs not completed on time. There is a lot more uncertainty in these estimates because there are fewer observations (only including those reports that were not resolved on time).
+
+```{r}
+# apply plotting function across xvars, using overdue time metric
+map(xvars, plot_disp, yvar = "overdue_time")
+```
+
+There is one key overall takeaway from these plots. While there are some clear disparities in overdue time by Ward and by month of report, I think a likely explanation here is that the complexity of some cases and/or external factors may impacting resolution times. These are pothole reports that are taking an exceptionally long time to resolve, and it may be that the reasons are idiosyncratic. Maybe special materials were on back order, key personnel were unavailable, road conditions made the repair unsafe, or even a data entry/tracking error occurred. In any case, it seems unreasonable to place too much emphasis on these disparities in overdue time by ward without more information.
+
+#### C. Predictors of On-Time Performance
+
+Finally, I'll use predictive modeling techniques to investigate on-time performance in a more comprehensive way, taking into account the various factors explored in this analysis.
+
+Below, I build a classification model that predicts whether or not a pothole report is resolved on time based on the following predictors:
+
+* Ward
+* Day of the week that report is made
+* Month that report is made
+* Total reports made on the day of report
+* Total reports made in the week of report
+
+```{r}
+# prepare modeling dataframe and create factor indicator for outcome (on-time completion)
+df_pred <- df %>%
+  select(on_time_completion, report_day, report_month, tot_report_day, tot_report_week, ward) %>%
+  mutate(on_time_completion = as.factor(as.numeric(on_time_completion)))
+```
+
+``` {r}
+# set randomization seed for reproducibility.
+set.seed(111)
+
+# prepare tidymodels recipe, converting factor variables to series of dummies as needed
+rec <- recipe(on_time_completion ~ ., data = df_pred) %>%
+  step_dummy(ward, report_day, report_month)
+
+# prepare random forest classification model using ranger engine
+# set impurity method for feature importance
+rf_mod <- rand_forest(mode = "classification") %>%
+  set_engine("ranger", importance = "impurity")
+
+# add model and recipe to workflow
+wkf <- workflow() %>%
+  add_model(rf_mod) %>%
+  add_recipe(rec)
+```
+
+The top 10 features for predicting on-time performance are shown in the following plot.
+
+```{r}
+# fit workflow to modeling dataframe
+# extract and plot top feature importances and plot
+wkf %>% 
+  fit(df_pred) %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 10)
+```
+
+The total number of reports made in the week of the report and on the same day of the report are among the most important predictive features (`tot_report_week` and `tot_report_day`). This aligns with the descriptive findings in this analysis, which highlighted a correlation between on-time performance and number of reports - in general, on-time performance was lower in the busiest reporting months. Similarly, reports being made in January and February are also among the most important features in the classification model (`report_month_01` and `report_month_02`).
+
+Overall, the top 7 most important features have to do with reporting volumes or month of report. Ward features are of lower feature importance. These findings are consistent with earlier descriptive results.
+
+## Limitations
+
+One key limitation of this analysis is the limited information available. The 311 reporting database only includes information about the location and timing of a given pothole report. Therefore, the findings presented here are limited in utility. This exploratory analysis would be improved with more information about the pothole report. For example, pothole size (i.e., depth or diameter) and location (i.e., middle of road vs. side of road) are likely very important factors influencing on-time resolution because very large potholes in the middle of roads are likely prioritized. The 311 database does include a `priority` field but, as explored earlier, there are only a handful of reports not considered "Standard".
+
+Further, this analysis could be improved with some additional external information. For example, I would be interested to include some external data on weather conditions in this analysis because poor weather is likely positively correlated with the incidence of pothole reports as well as longer resolution wait times.
+
+Finally, one potential problem with this analysis is that there could be "duplicates", or multiple reports that refer to the same pothole. In other words, it seems likely that multiple residents could submit a 311 request for the same pothole on the same day or in the same week. This would create some bias in my results because these "duplicate" records would seemingly be resolved much more quickly than might otherwise be expected, since they actually refer to the same pothole. Closer investigation into the address field could shed light on this possibility.
+
+## Conclusions
+
+DDOT investigations and repairs of potholes are crucial city functions that help to protect drivers, vehicles, and pedestrians in Washington, DC. In 2021, DDOT received several thousand pothole reports through the 311 reporting system. This analysis finds some disparities in the incidence of these reports by Ward, which may be correlated with factors like high road usage and natural susceptibility to potholes in certain areas. There are also clear seasonal disparities in report incidence, with the majority of pothole reports made in the months of March and April.
+
+Overall, DDOT resolves about 3 in 4 pothole reports within 3 business days. However, on-time performance and wait times vary significantly over the course of the year, with much lower on-time performance in the winter months of January and February. There is little evidence of disparities in on-time performance by Ward, and many differences in overdue time can likely be explained by the idiosyncrasies of specific pothole repairs.
+
+Finally, simple predictive modeling shows that the most important predictors of pothole resolution on-time performance are contemporaneous report volumes and month of report. DDOT has relatively poor performance resolving the pothole reports it receives during the winter and during particularly busy reporting times in the spring, and might consider taking proactive actions to reallocate resources to respond more quickly and efficiently during these times.
