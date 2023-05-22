@@ -12,7 +12,7 @@ format:
 
 # Exploratory Data Analysis of Pothole Reports and Repairs in Washington, DC
 
-Code sample located [here](https://github.com/jandre17/code-samples/tree/main/eda_potholes_R). (https://github.com/jandre17/code-samples/tree/main/eda_potholes_R)
+Native files for this code sample can be found [here](https://github.com/jandre17/code-samples/tree/main/eda_potholes_R). (https://github.com/jandre17/code-samples/tree/main/eda_potholes_R)
 
 Note: This code sample is contained within a Quarto document. [Quarto](https://quarto.org/) is a powerful scientific publishing system for documentation and reproducibility of data analyses.
 
